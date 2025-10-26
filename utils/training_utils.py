@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch import optim
 
 from model import FlowMatchingModel, sample_xt_and_target
-from utils import make_loader
+from utils.utils import make_loader
 
 
 class WarmupCosine:

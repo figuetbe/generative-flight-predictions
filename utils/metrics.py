@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from inference_utils import denorm_seq_to_global, sample_future_heun
+from utils.inference_utils import denorm_seq_to_global, sample_future_heun
 
 # ------------------------------
 # Utilities

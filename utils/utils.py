@@ -24,7 +24,9 @@ lvl95 = pyproj.Proj("EPSG:2056")
 KNOTS2MPS = 0.5144444444444444
 FTPM2MPS = 0.3048 / 60.0
 
-CACHE_DIR = pathlib.Path("./dataset_cache")
+# Determine project root and cache directory
+_project_root = pathlib.Path(__file__).parent.parent  # utils/ parent directory
+CACHE_DIR = _project_root / "dataset_cache"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 CACHE_VERSION = "cfm-v4"
 

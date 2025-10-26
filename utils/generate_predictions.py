@@ -14,7 +14,7 @@ import torch
 
 # ----- If you already have these elsewhere, you can delete the imports below and use your own -----
 # We keep them here to make the script self-contained and robust.
-from utils import aircraft_centric_transform
+from utils.utils import aircraft_centric_transform
 
 # =========================
 # Geometry / transforms
@@ -175,7 +175,9 @@ def sample_many_safe(
     """
     Wraps your sample_many version to ensure output is (n_samples, T_out, D).
     """
-    from inference_utils import sample_many as _sample_many  # use your implementation
+    from utils.inference_utils import (
+        sample_many as _sample_many,  # use your implementation
+    )
 
     y = _sample_many(
         model,
