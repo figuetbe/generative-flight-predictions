@@ -1,0 +1,29 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Data
+dataset_cache/
+*.parquet
+*.key.json
+*.pt
+*.pth
+*.pkl
+*.npz
+*.npy
+*.npz
+
+# Figures
+figures/
+*.svg
+
+# Webdata
+webdata/
+

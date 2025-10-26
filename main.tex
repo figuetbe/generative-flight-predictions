@@ -1,0 +1,562 @@
+\documentclass[
+  manuscript=proceedings,  %% article (default), rescience, data, software, proceedings, poster
+  layout=preprint,  %% preprint (for submission) or publish (for publisher only)
+  year=20xx,
+  volume=x,
+]{extra/joas}
+
+\doi{xx.xxxxx/joas.xxxx.xxxx}
+
+% \conference{} command is only used for proceedings
+\conference{The 13th OpenSky Symposium}
+
+\received {1 April 20xx}
+\revised  {1 May 20xx}
+\accepted {10 May 20xx}
+\published{20 May 20xx}
+
+\editor{Editor Name}
+
+\reviewers{First Reviewer, Second Reviewer, Third Reviewer}
+
+% specify the .bib file for references
+\addbibresource{reference.bib}
+\usepackage{svg}
+
+
+% --- below is the area for authors ---
+
+% Title within 12 words
+\title{Generative Short-Term Aircraft Trajectory Prediction with Conditional Flow Matching}
+
+\author{Benoit Figuet \orcid{0000-0001-5453-8584}}
+\affiliation{Centre for Aviation, School of Engineering, Zurich University of Applied Sciences, Winterthur, Switzerland}
+\alsoaffiliation{SkAI Data Services, Zurich, Switzerland}
+\email{benoit.figuet@zhaw.ch}
+
+\author{Timothé Krauth \orcid{0000-0003-0601-4588}}
+\affiliation{Centre for Aviation, School of Engineering, Zurich University of Applied Sciences, Winterthur, Switzerland}
+
+\author{Steve Barry}
+\affiliation{Airservices Australia, Canberra, Australia}
+
+% maximum five keywords
+\keywords{trajectory prediction; air traffic management; conditional flow matching; generative modeling}
+
+% Important: don't overuse abbreviations. Only use abbreviations if the term is used more than ten times throughout the paper. Otherwise, write them in full.
+\abbreviations{
+    ADS--B: Automatic Dependent Surveillance--Broadcast,
+    ANSP: Air Navigation Service Provider,
+    ATM: Air Traffic Management,
+    CFM: Conditional Flow Matching,
+    CNN--LSTM: Convolutional Neural Network--Long Short-Term Memory,
+    CV: Constant Velocity,
+    FIR: Flight Information Region,
+    FL: Flight Level,
+    GAN: Generative Adversarial Network,
+    LV95: Swiss national coordinate reference system (CH1903+/LV95),
+    MAE: Mean Absolute Error,
+    MAC: Mid-Air Collision,
+    MLP: Multilayer Perceptron,
+    MSE: Mean Squared Error,
+    ODE: Ordinary Differential Equation,
+    OT: Optimal Transport,
+    PIT: Probability Integral Transform,
+    RK: Runge--Kutta,
+    RMSE: Root-Mean-Square Error,
+    SiLU: Sigmoid Linear Unit,
+    STCA: Short-Term Conflict Alert,
+    STTP: Short-Term Trajectory Prediction,
+    TCAS: Traffic Collision Avoidance System,
+    VAE: Variational Autoencoder
+}
+
+
+\begin{document}
+
+\begin{abstract}
+Reliable short-term aircraft trajectory prediction is essential for safety and efficiency in Air Traffic Management (ATM). This work introduces a generative framework for probabilistic 4D trajectory forecasting based on Conditional Flow Matching (CFM), a recent deep generative modeling approach that combines stable, regression-based training with efficient sampling in a likelihood-enabled flow model. The model is trained on historical ADS--B data from the OpenSky Network to predict aircraft motion over a 60\,s horizon, conditioned on the preceding 60\,s of observations. The model generates ensembles of realistic future trajectories that capture the inherent uncertainty of aircraft motion and enable probabilistic assessment of potential conflicts. As an application, we estimate the probability of mid-air collision during a loss-of-separation event using Monte Carlo simulation over the generated trajectories, providing a quantitative risk measure. The results demonstrate that flow-based generative modeling offers a principled foundation for uncertainty-aware trajectory prediction and safety analysis in ATM.
+\end{abstract}
+
+\section{Introduction}
+
+Reliable short-term aircraft trajectory prediction is fundamental to safe and efficient Air Traffic Management (ATM). 
+Operational safety nets such as TCAS~II~\cite{munoz2013tcas} and Short-Term Conflict Alert (STCA)~\cite{eurocontrol2017stca} rely on linear extrapolations to generate collision alerts. 
+While simple and robust, such deterministic approaches cannot capture the uncertainty and variability inherent in real-world trajectories. 
+
+Effective short-term trajectory prediction (STTP) algorithms have immediate benefit to Air Navigation Service Providers (ANSPs) and regulators. 
+A central task for ANSPs is assessing risk for numerous airspace occurrences, such as a loss of separation (LOS) or TCAS events, as well as thousands of conflicts detected by data mining all surveillance tracks. 
+An essential component of this assessment is determining whether each detected conflict is \emph{real} or a false positive for instance, cases where aircraft were expected to turn as part of a published procedure before any potential collision. 
+
+As illustrated schematically in Figure~\ref{fig:conflict_schematic}, linear extrapolation can indicate a high-risk situation if no deviation occurs, yet it is often unclear whether the aircraft had intended to turn as part of its standard path. 
+Historical trajectories can reveal whether an aircraft was following an established procedure or deviating from it, thus determining whether the risk was genuine or merely apparent. 
+In practice, this distinction is rarely binary: large-scale surveillance data exhibit significant variability, and data-driven models are needed to capture the range of plausible futures consistent with observed intent.
+
+\begin{figure}[t]
+    \centering
+    \subfigure[]{
+        \includegraphics[width=0.45\textwidth]{figures/steve_senarios_a.png}
+        \label{fig:conflict_schematic_a}
+    }
+    \subfigure[]{
+        \includegraphics[width=0.45\textwidth]{figures/steve_senarios_b.png}
+        \label{fig:conflict_schematic_b}
+    } \\
+    \subfigure[]{
+        \includegraphics[width=0.45\textwidth]{figures/steve_senarios_c.png}
+        \label{fig:conflict_schematic_c}
+    }
+    \subfigure[]{
+        \includegraphics[width=0.45\textwidth]{figures/steve_senarios_d.png}
+        \label{fig:conflict_schematic_d}
+    }
+    \caption{Schematic illustration of conflict evaluation for short-term trajectory prediction. 
+    (\textbf{a}) A potential conflict between two aircraft is detected from surveillance tracks. 
+    (\textbf{b}) Linear extrapolation of the current trajectories indicates a possible collision at the projected point of highest risk. 
+    (\textbf{c}) Historical trajectories reveal that the aircraft were expected to turn as part of a standard procedure, suggesting a false positive. 
+    (\textbf{d}) Historical trajectories reveal that the red aircraft was expected to continue straight, suggesting a true positive. 
+    The history of trajectories provides probabilistic evidence of intent, enabling data-driven classification of real versus false conflicts.}
+    \label{fig:conflict_schematic}
+\end{figure}
+
+In recent years, research has increasingly explored data-driven prediction methods to address these challenges.
+Liu and Hansen~\cite{liu2018predicting} proposed a deep generative convolutional recurrent network for multimodal trajectory prediction, while Krauth et al.\cite{krauth2021synthetic} introduced multivariate density models to synthesize realistic aircraft trajectories.
+Jarry et al.~\cite{jarry2019use} employed a Generative Adversarial Network (GAN) to learn the probability distributions of real aircraft approach paths, enabling the generation of realistic trajectories and the detection of atypical flight behaviors.
+Zeng et al.~\cite{zeng2022aircraft} provide a comprehensive review of trajectory prediction techniques, emphasizing both progress and remaining challenges. Despite these advances, most models still predict a single deterministic trajectory, making uncertainty quantification difficult.
+
+To address this limitation, Krauth et al.~\cite{krauth2025multi} recently proposed a multi-objective CNN--LSTM architecture that predicts not only the expected trajectory but also spatio-temporal confidence areas, enabling the construction of 95\% prediction intervals for each state component. 
+These developments highlight a growing recognition that uncertainty-aware prediction is essential for robust ATM applications.
+
+% Building on these efforts, this paper introduces a generative framework for probabilistic short-term trajectory forecasting based on Conditional Flow Matching (CFM)~\cite{lipman2023flowmatching}. 
+% Given one minute of observation, a Transformer-based conditional flow estimates the distribution of the trajectory for the next minute conditioned on observed inputs. 
+% This formulation allows the generation of multiple plausible futures an ensemble that captures the stochastic nature of real trajectories, offering a data-driven means to assess both real and false conflicts within a probabilistic risk-assessment framework.
+
+Building on these efforts, this paper introduces a generative framework for probabilistic short-term trajectory forecasting based on Conditional Flow Matching (CFM)~\cite{lipman2023flowmatching}, which learns to transform random noise into plausible trajectories via ordinary differential equations (ODEs). Given one minute of observation, a Transformer-based conditional flow estimates the distribution of the trajectory for the next minute conditioned on observed inputs. The one-minute prediction horizon is chosen to align with the operational timescales of airborne safety nets such as TCAS whose alerting logic typically operates within a 30–45 s look-ahead window~\cite{munoz2013tcas}. In practice, the proposed framework is not limited to this horizon and can be extended to longer prediction intervals as required by specific Air Traffic Management applications. 
+
+This formulation allows the generation of multiple plausible future trajectories that capture the stochastic nature of real aircraft motion, offering a data-driven means to assess both real and false conflicts within a probabilistic risk-assessment framework. We favour CFM over GANs~\cite{goodfellow2020generative}, VAEs~\cite{kingma2013auto}, or standard diffusion models~\cite{ho2020denoising} because it offers stable, regression-based training while remaining likelihood-enabled through the learned flow, avoids the adversarial instabilities of GANs and the heavy noise-schedule simulation burden of diffusion models, and enables faster inference via simpler flow paths with fewer integration steps~\cite{tong2023improving}.
+
+\section{Background: Conditional Flow Matching}
+\label{sec:background-cfm}
+
+Flow Matching (FM) is a framework for training generative models via continuous flows \cite{lipman2023flowmatching, liu2022flow}. The key idea is to describe the transformation from a simple base distribution (e.g., Gaussian noise) to a complex data distribution (e.g., aircraft trajectories) as the solution of an ordinary differential equation (ODE) driven by a time-dependent vector field  $v_t$. A flow $\phi_t$, defined as the solution to this ODE, maps samples from the prior to the data space. Flow Matching provides a simulation-free method to learn this vector field by regressing it against a target vector field $u_t$ that generates a desired probability path $\{p_t\}_{t \in [0,1]}$ connecting a prior distribution $p_0$ to a target data distribution $p_1$.
+
+This section summarizes the Flow Matching and Conditional Flow Matching results introduced by Lipman et~al.~\cite{lipman2023flowmatching} and further developed in subsequent lecture notes~\cite{flowsanddiffusions2025}.
+
+\subsection{Flow Matching}
+Let $p(x)$ be a simple, tractable prior distribution (e.g., a standard normal $\mathcal{N}(x|0,I)$) and let $q(x_1)$ be the target data distribution from which we can draw samples. We consider a probability path $p_t$ such that $p_0=p$ and $p_1$ approximates $q$. This path is generated by an unknown target vector field $u_t$. The goal is to train a neural network $v_t(x;\theta)$ to approximate $u_t$.
+
+The Flow Matching (FM) objective is a regression loss defined as:
+\begin{equation}
+\mathcal{L}_{\mathrm{FM}}(\theta) = \mathbb{E}_{t \sim U[0,1],\, x \sim p_t(x)} \left\lVert v_t(x;\theta) - u_t(x) \right\rVert^2.
+\label{eq:fm-loss}
+\end{equation}
+Minimizing this objective forces the learned vector field $v_t$ to match the target field $u_t$. At inference, we can generate new samples by solving the initial value problem $\frac{d}{dt}X_t = v_t(X_t;\theta)$ from $t=0$ to $t=1$, with $X_0 \sim p(x)$. However, this objective is intractable because both the marginal path $p_t(x)$ and its vector field $u_t(x)$ are generally unknown.
+
+\subsection{Conditional Flow Matching}
+CFM reformulates the problem to be solvable in practice. The core idea is to construct the intractable marginal path $p_t(x)$ by marginalizing over a set of simpler, per-sample conditional probability paths $p_t(x|x_1)$:
+$$p_t(x) = \int p_t(x|x_1)q(x_1)dx_1.$$
+Each conditional path is designed to start from the prior at $t=0$ (i.e., $p_0(x|x_1) = p(x)$) and end in a distribution concentrated around a specific data sample $x_1$ at $t=1$. The corresponding marginal vector field $u_t(x)$ can also be expressed as an aggregation of the conditional vector fields $u_t(x|x_1)$.
+
+The key insight of CFM is that the gradients of the intractable FM objective \eqref{eq:fm-loss} are identical to the gradients of a much simpler objective that uses the conditional paths directly. The CFM objective is:
+\begin{equation}
+\mathcal{L}_{\mathrm{CFM}}(\theta) = \mathbb{E}_{t \sim U[0,1],\,x_1 \sim q(x_1),\,x \sim p_t(x|x_1)} \left\lVert v_t(x;\theta) - u_t(x|x_1) \right\rVert^2.
+\label{eq:cfm-loss}
+\end{equation}
+This loss is tractable because sampling from $p_t(x|x_1)$ and evaluating its vector field $u_t(x|x_1)$ can be done in closed form for well-chosen conditional paths.
+
+\subsection{Gaussian and Optimal Transport Paths}
+A general and effective choice for the conditional paths are Gaussian paths of the form:
+$$p_t(x|x_1) = \mathcal{N}\big(x|\mu_t(x_1), \sigma_t(x_1)^2 I\big),$$
+where the time-dependent mean $\mu_t(x_1)$ and standard deviation $\sigma_t(x_1)$ satisfy the boundary conditions $\mu_0(x_1)=0, \sigma_0(x_1)=1$ and $\mu_1(x_1)=x_1, \sigma_1(x_1)=\sigma_{\min}$, with $\sigma_{\min}$ being a small positive constant. The vector field that generates this path is given by:
+\begin{equation}
+u_t(x|x_1) = \frac{\sigma_t'(x_1)}{\sigma_t(x_1)}\big(x - \mu_t(x_1)\big) + \mu_t'(x_1).
+\label{eq:cfm-vectorfield}
+\end{equation}
+
+A particularly powerful instance uses linear schedules for the mean and standard deviation, which corresponds to the Optimal Transport (OT) displacement interpolant between the Gaussians at $t=0$ and $t=1$. Setting
+$$\mu_t(x_1) = t\,x_1 \quad \text{and} \quad \sigma_t(x_1) = 1 - (1-\sigma_{\min})\,t,$$
+the target vector field in Equation \eqref{eq:cfm-vectorfield} simplifies to:
+$$u_t(x|x_1) = \frac{x_1 - (1-\sigma_{\min})x}{1 - (1-\sigma_{\min})t}.$$
+This vector field has a direction that is constant over time, making it simpler for a neural network to learn. The resulting paths move along straight line trajectories from noise to data, leading to more efficient training and sampling. In this work we instantiate the straight-line OT path with $\sigma_{\min}{=}0$, which yields $\sigma_t{=}1{-}t$ and
+\[
+u_t(x\mid x_1) = \frac{x_1 - x}{1 - t}.
+\]
+This choice underlies the regression target used in the training objective below.
+
+\subsection{CFM in Practice:}
+\label{subsec:cfm-highlevel}
+
+We train a vector-field network $v_t(x;\theta)$ (optionally $v_t(x,c;\theta)$ with context $c$) that predicts the instantaneous velocity of a sample $x$ along a probability path from a simple prior $p_0$ to the data distribution. Conceptually, $v_t$ replaces the unknown target field $u_t$ and encodes ``how to move'' data at each time $t\in[0,1]$.
+
+% training objectif
+Learning is pure regression: minimize the Conditional Flow Matching loss in \eqref{eq:cfm-loss}, which is an MSE between the network and a closed-form target field $u_t(x\!\mid\!x_1)$ defined by your chosen conditional path (e.g., the Gaussian/OT path of \eqref{eq:cfm-vectorfield}). This objective provides unbiased gradients for the intractable FM loss and requires no likelihoods, scores, or simulation of trajectories during training.
+
+% training loop
+At each iteration, draw a random time $t$, a data example $x_1$, and a synthetic point $x\sim p_t(x\!\mid\!x_1)$ from the conditional path; compute the analytic target $u_t(x\!\mid\!x_1)$; regress $v_t(x;\theta)$ toward it with MSE. Repeat over mini-batches with your optimizer of choice.
+
+% sampling
+After training, generate by integrating the learned ODE $\frac{d}{dt}X_t=v_t(X_t;\theta)$ from $t=0$ to $t=1$ starting at $X_0\sim p_0$ (e.g., standard normal). Any standard ODE solver (Euler/Heun/RK) with a modest number of steps suffices; $X_1$ is the synthesized sample.
+
+
+
+
+
+\section{Methodology 1}
+
+\subsection{Data and Preprocessing}
+
+We use one month of ADS--B surveillance data from the OpenSky Network~\cite{Schaefer_etal_2014}, restricted to flights above FL195 within the Swiss FIR and collected with the \texttt{traffic} library~\cite{Olive_2019}. All trajectories are sampled at 1\,Hz.
+
+\paragraph{Feature engineering.}
+From ADS--B state vectors, we derive a consistent kinematic representation. Latitude and longitude are projected to the Swiss projected grid (CH1903{+}/LV95; EPSG:2056), yielding planar coordinates $(x,y)$ with $x$ Easting and $y$ Northing; altitude is converted to meters $(z)$. Groundspeed $v$ and track angle $\theta$ (clockwise from North) define horizontal velocity components $(v_x = v\sin\theta,\; v_y = v\cos\theta)$, while the vertical rate provides $v_z$ (ft/min converted to m/s). A turn-rate proxy $\dot{\psi}$ is computed from the unwrapped angular change between successive horizontal velocity vectors, divided by the sampling interval (1\,s), and clipped to $\pm 0.25\,\text{rad/s}$ to suppress outliers. Each trajectory point in the global frame is thus
+\[
+(x,\, y,\, z,\, v_x,\, v_y,\, v_z,\, \dot{\psi}),
+\]
+a 7-dimensional state encoding position and motion.
+
+\paragraph{Windowing and sampling.}
+Examples are constructed as sliding windows across flights. Each sample comprises $60$\,s of history sampled at 1\,Hz and a $60$\,s prediction horizon; futures are down-sampled every $5$\,s, yielding $12$ targets per window. Splits are performed at flight level to eliminate leakage between train, validation, and test sets. The training set contains $1{,}000{,}000$ input--output pairs, while the validation and test sets each contain $200{,}000$ samples.
+
+To ensure exposure to maneuvering behavior, at least $30\%$ of the training and validation samples contain a turn, defined as $\geq 3$ consecutive steps with $\dot{\psi} > 0.01\,\text{rad/s}$ occurring in the history and/or future portion of the window; remaining samples are drawn uniformly to preserve overall traffic statistics. The test set is sampled uniformly without turn constraints.
+
+\paragraph{Aircraft-centric normalization.}
+To reduce variance and improve generalization, we transform each window into an aircraft-centric frame that is fixed by the last observed state. The last observed position defines the origin, and the last horizontal velocity vector defines the forward axis; the frame does not rotate over the prediction horizon. We denote aircraft-centric quantities with tildes. The per-timestep input sequence is
+\[
+(\,\tilde{x},\, \tilde{y},\, \tilde{z},\, \tilde{v}_x,\, \tilde{v}_y,\, \tilde{v}_z,\, \dot{\psi}\,),
+\]
+where $(\tilde{x},\tilde{y},\tilde{z})$ and $(\tilde{v}_x,\tilde{v}_y,\tilde{v}_z)$ are positions and velocities expressed in this fixed local frame, while the turn rate $\dot{\psi}$ is unchanged.
+
+In addition, we provide an 8-dimensional context vector that captures the absolute reference state at the history endpoint:
+\[
+\bigl(\, x_{\text{abs}},\, y_{\text{abs}},\, z_{\text{abs}},\, \cos\theta,\, \sin\theta,\, v_{\text{gs,last}},\, v_{z,\text{last}},\, \dot{\psi}_{\text{last}} \,\bigr),
+\]
+where $(x_{\text{abs}},y_{\text{abs}},z_{\text{abs}})$ are absolute LV95 coordinates (m), $(\cos\theta,\sin\theta)$ encode the track angle, $v_{\text{gs,last}}$ is ground speed, $v_{z,\text{last}}$ is vertical speed, and $\dot{\psi}_{\text{last}}$ is the final turn rate. Thus, the model ingests (i) a 7-D aircraft-centric trajectory sequence capturing local dynamics and (ii) an 8-D global context anchoring the sequence in absolute space and orientation.
+
+Both the sequence and the context are standardized using their own mean and variance, estimated on the training set and applied to all splits.
+
+\subsection{Model Architecture}
+
+Our predictor is a Transformer encoder–decoder that learns to map an observed flight history to a distribution of future trajectories. The model operates on three types of input:
+
+\begin{enumerate}
+    \item \textbf{History sequence:} the last $60$\,s of aircraft motion (7 features per timestep).
+    \item \textbf{Context vector:} an 8-D descriptor of the aircraft’s absolute position and orientation at the end of the history.
+    \item \textbf{Noisy future:} a 12-step sequence of future states, perturbed with Gaussian noise (used only during training).
+\end{enumerate}
+
+\paragraph{History encoder.}
+The 60 history steps (7 features each) are first linearly projected to 512 dimensions and enriched with positional encodings. The 8-D global context vector is mapped to 512 dimensions and prepended as an extra token at the front of the sequence, so that the Transformer can jointly attend to context and history (akin to a [CLS] token \cite{devlin2019bert}). This combined sequence of 61 tokens (each 512-D) is processed by six Transformer encoder layers, producing a latent representation of the past trajectory that serves as memory for the decoder.
+
+\paragraph{Time embedding.}
+The flow-matching process depends on a scalar time variable $t \in [0,1]$, which indicates how far we are between pure noise ($t=0$) and the true future ($t=1$). To make this information usable by the Transformer, $t$ is first expanded into sinusoidal features using 64 frequencies (yielding 128 features: sine and cosine). These are passed through a small MLP: a fully connected layer maps 128 inputs to 256 hidden units with SiLU activation, followed by a second fully connected layer mapping 256 to 512 units. The resulting 512-D time embedding is added to both the noisy future tokens and to the encoded history, so the model always knows “when” in the flow it is operating.
+
+\paragraph{Future denoiser.}
+The noisy future sequence is projected into the latent space and processed by an eight-layer Transformer decoder with causal self-attention across future tokens and cross-attention to the encoded history. Finally, a linear layer maps the decoder output back to 7 physical features per step, representing the predicted vector field
+\[
+v_\theta(x_t, t \mid \text{history}, \text{context}) \in \mathbb{R}^{12 \times 7}.
+\]
+
+% \begin{figure}[hbt]
+% \centering
+% \includesvg[width=\linewidth]{figures/cfm_torchview.svg}
+% \caption{Architecture of the flow-matching Transformer model. The history encoder processes past trajectory data and context, the time embedding provides temporal conditioning, and the future denoiser generates denoised predictions through cross-attention to the encoded history.}
+% \label{fig:model}
+% \end{figure}
+
+\begin{figure}[hbt]
+    \centering
+    \includesvg[width=\linewidth]{figures/cfm_torchview}
+    \caption{Architecture of the flow-matching Transformer model. The history encoder processes past trajectory data and context, the time embedding provides temporal conditioning, and the future denoiser generates denoised predictions.}
+    \label{fig:model}
+\end{figure}
+
+\paragraph{Summary.}
+In essence, the encoder compresses the past 60\,s of motion into a latent memory, the time embedding guides how noise is transformed along the flow, and the decoder denoises 12 future steps conditioned on both history and context. The complete architecture is illustrated in Figure~\ref{fig:model}.
+
+\subsection{Training and Inference}
+
+\paragraph{Objective (flow matching).}
+Let the normalized future be $x_1 \in \mathbb{R}^{N_f \times 7}$ and partition the
+channel dimension as
+$x_1=(x_1^{\text{pos}},\,x_1^{\text{vel}},\,x_1^{\psi})$
+with shapes $N_f{\times}3$, $N_f{\times}3$, and $N_f{\times}1$, respectively.
+Sample $\boldsymbol{\varepsilon}\sim\mathcal{N}(0,I)$ and $t\sim U[0,1]$, and form
+\begin{align}
+x_t &= (1-t)\,\boldsymbol{\varepsilon} + t\,x_1, &
+v^\star &= x_1 - \boldsymbol{\varepsilon}. \label{eq:fm_target}
+\end{align}
+The network outputs $v_\theta(x_t,t)$ and we minimize a weighted MSE
+(i.e., $\mathbb{E}_{t,\varepsilon}\,\lVert v_\theta - v^\star \rVert^2$) expressed in target-space
+components:
+\begin{align}
+\hat{x}_1 &= \boldsymbol{\varepsilon} + v_\theta(x_t,t), \\
+\mathcal{L} \; &= \;
+\lambda_{\text{pos}} \,\lVert \hat{x}_1^{\text{pos}} - x_1^{\text{pos}} \rVert^2
++ \lambda_{\text{vel}} \,\lVert \hat{x}_1^{\text{vel}} - x_1^{\text{vel}} \rVert^2
++ \lambda_{\psi}    \,\lVert \hat{x}_1^{\psi}     - x_1^{\psi}     \rVert^2,
+\end{align}
+with $\lambda_{\text{pos}}{=}1.0$, $\lambda_{\text{vel}}{=}0.5$, and $\lambda_{\psi}{=}0.05$. These weights were chosen empirically to balance the different scales and importance of position, velocity, and turn-rate errors during training.
+Here $\lVert\cdot\rVert^2$ denotes the sum of squared errors over tokens and channels.
+
+\paragraph{Path instantiation and equivalence.}
+With the $\sigma_{\min}{=}0$ OT path (see Section~\ref{sec:background-cfm}), we have $\mu_t{=}t\,x_1$ and $\sigma_t{=}1{-}t$, so the closed-form target field from \eqref{eq:cfm-vectorfield} is $u_t(x\mid x_1){=}(x_1{-}x)/(1{-}t)$. Sampling $x_t{=}(1{-}t)\,\boldsymbol{\varepsilon}+t\,x_1$ implies $\boldsymbol{\varepsilon}{=}(x_t{-}t\,x_1)/(1{-}t)$ and therefore
+\[
+v^\star\;=\;x_1 - \boldsymbol{\varepsilon}\;=\;\frac{x_1 - x_t}{1 - t}\;=\;u_t(x_t\mid x_1),
+\]
+which shows that the regression target in \eqref{eq:fm_target} exactly matches the analytic vector field for this instantiated path.
+
+% \paragraph{Optimization and stabilization.}
+We train with AdamW, a warmup+cosine learning-rate schedule, dropout $0.1$, and maintain an exponential moving average (EMA) of parameters for evaluation and checkpointing.
+
+% \paragraph{Inference and postprocessing.}
+At test time we sample from the learned flow by initializing $x_{t=0}\sim\mathcal{N}(0,I)$ and integrating the ODE
+
+\begin{equation}
+\frac{d x_t}{d t} \;=\; v_\theta\!\left(x_t, t \,\middle|\, \text{history}, \text{context}\right).
+\label{eq:cfm_ode}
+\end{equation}
+
+from $t{=}0$ to $t{=}1$ using a predictor--corrector scheme (Heun's method) with a fixed number of steps. This yields a 12-token aircraft-centric future. Samples are then denormalized and mapped back to the global frame by (i) inverse-rotating $(\tilde{x},\tilde{y})$ and $(\tilde{v}_x,\tilde{v}_y)$ using $(\cos\theta,\sin\theta)$ from the context (fixed frame), and (ii) translating by the absolute reference $(x_{\text{abs}},y_{\text{abs}},z_{\text{abs}})$. Repeating the sampling procedure produces ensembles of plausible 60\,s futures conditioned on the observed 60\,s history.
+
+\subsection{Accuracy and Probabilistic Calibration}
+\label{subsec:evaluation}
+
+We evaluate both point accuracy and probabilistic calibration of the proposed CFM forecaster on held-out test windows. Unless noted otherwise, we report results over $N$ windows (default $N{=}512$) with $K$ forecast steps (default $K{=}12$, i.e.\ $5$\,s stride over a $60$\,s horizon).
+
+
+Given a history $H$, a context $c$, and the learned vector field $v_\theta(\cdot,t\mid H,c)$, we draw $S$ forecast samples by integrating the ODE with $S$ distinct initial noises in the aircraft-centric normalized frame. Each trajectory is then denormalized and mapped back to the global LV95 frame using the inverse of the per-window normalization and the fixed-frame transformation. We denote global positions by $\hat{y}^{(s)}_{\tau}\in\mathbb{R}^3$ (Easting, Northing, altitude) and ground-truth by $y^{\star}_{\tau}$ for $\tau{=}1,\dots,K$.
+
+\subsubsection{Deterministic Accuracy vs.\ Horizon}
+\label{subsubsec:mae_rmse}
+
+We evaluate geometric prediction error at each forecast horizon $\tau$ (in seconds) using two metrics: mean absolute error (MAE) and root mean square error (RMSE). We compare three predictors:
+
+\begin{enumerate}
+  \item \textbf{Model (mean).} Ensemble mean $\bar{y}_\tau = \frac{1}{S}\sum_{s=1}^S \hat{y}_\tau^{(s)}$.
+  \item \textbf{Model (best-of-$S$).} A diagnostic lower bound selecting the sample closest to ground truth:
+  \[
+  y^{\text{best}}_\tau = \arg\min_{s \le S} \bigl\lVert \hat{y}^{(s)}_\tau - y^\star_\tau \bigr\rVert_2,
+  \]
+  which probes ensemble coverage.
+  \item \textbf{Constant-velocity baseline.} Linear extrapolation in global coordinates using the last observed ground and vertical speeds.
+\end{enumerate}
+
+For any predictor $\mathbf{y}^{(\cdot)}_\tau$, errors over $N$ trajectories are
+\begin{align}
+\mathrm{MAE}_\tau 
+&= \frac{1}{N}\sum_{n=1}^N 
+\bigl\lVert y^{(\cdot,n)}_{\tau} - y^{\star(n)}_{\tau} \bigr\rVert_2,
+\label{eq:mae}\\[4pt]
+\mathrm{RMSE}_\tau 
+&= \sqrt{\frac{1}{N}\sum_{n=1}^N 
+\bigl\lVert y^{(\cdot,n)}_{\tau} - y^{\star(n)}_{\tau} \bigr\rVert_2^2 }.
+\label{eq:rmse}
+\end{align}
+
+We report $\mathrm{MAE}_\tau$ and $\mathrm{RMSE}_\tau$ for all three predictors as functions of the horizon $\tau = \{5,10,\ldots,60\}$\,s (default $\Delta \tau{=}5$\,s).
+\subsubsection{Probabilistic Calibration Diagnostics}
+\label{subsubsec:calibration}
+
+To assess whether the model’s forecast distribution matches empirical frequencies, we use three complementary diagnostics computed from the same sample set $\{\hat{p}^{(s)}_t\}$:
+
+\paragraph{Probability Integral Transform (PIT).}
+For each axis $d\in\{x,y,z\}$ and each $(n,t)$, we compute the sample-based PIT value
+\[
+\mathrm{PIT}_{n,t,d} \;=\; \frac{1}{S}\sum_{s=1}^S \mathbb{I}\!\left\{ \hat{y}^{(s,n)}_{t,d} \le y^{\star(n)}_{t,d} \right\}.
+\]
+For a calibrated univariate predictive distribution, $\mathrm{PIT}$ should be uniformly distributed on $[0,1]$. We therefore aggregate $\mathrm{PIT}_{n,t,d}$ over $n$ and $t$ and report axis-wise histograms; deviations from uniformity indicate under/over-dispersion or bias.
+
+\subsection{Application to a real-world conflict}
+
+To illustrate the operational use of the proposed approach, we analyze a real encounter extracted from ADS--B data (Figure~\ref{fig:conflicting_pair}). 
+In this event, one aircraft was maintaining level flight at FL310 while the other was descending through FL310 on a converging path. 
+The recorded data show that the minimum horizontal and vertical spacings fell below the prescribed separation minima (<5~nautical miles horizontal and <1,000~feet vertical), resulting in an actual LOS.
+
+\begin{figure}[hbt]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figures/conflicting_pair}
+    \caption{A pair of aircraft trajectories ending in a loss of separation.}
+    \label{fig:conflicting_pair}
+\end{figure}
+
+Based on the observed histories of both aircraft, we generated $n$ stochastic future trajectories for each one using the CFM model. 
+Every possible combination of one sampled future from each aircraft was resampled from 0.2\,Hz (5\,s resolution) to 1\,Hz by linear interpolation and then examined to determine whether standard separation minima were breached or a MAC observed at any point within the prediction horizon.
+
+Throughout the forecast, we monitored the horizontal and vertical spacing between the two aircraft. 
+A situation was classified as a LOS when, at any moment, \emph{both} the horizontal distance was below 5~nautical miles \emph{and} the vertical distance was below 1,000~feet, matching the operational definition. 
+To capture more critical encounters, we also defined a \textit{midair collision} (MAC) proxy, corresponding to predicted cases where the aircraft approached closer than 0.03~nautical miles horizontally and 55~feet vertically. These thresholds are intentionally strict relative to standard separation and provide a conservative near-contact indicator; we recommend a sensitivity analysis over nearby thresholds to assess robustness, and we report results for the stated values.
+
+By counting the proportion of trajectory pairs that met either of these criteria, we obtained straightforward Monte Carlo estimates of the probabilities of a future LOS or MAC within the prediction window.
+
+\section{Results}
+
+\subsection{Ensemble Forecasts on Representative Cases}
+\label{subsec:spaghetti}
+
+Figure~\ref{fig:spaghetti_cases} shows ensemble forecasts for three representative flights.
+Each panel displays the 60\,s observed history (black), the 60\,s ground-truth future (red), 128 sampled futures from the CFM model (blue), and the ensemble mean trajectory (yellow).
+
+In the left panel, most samples follow a curved path while some continue straight.
+In the middle panel, all samples form a narrow bundle along the observed flight direction.
+In the right panel, the true continuation is straight, and several samples deviate slightly toward a right-hand branch.
+Across the three examples, the ensemble spread increases with prediction horizon, and the ensemble mean remains near the center of the sampled futures.
+
+\begin{figure}[hbt]
+\centering
+\includegraphics[width=\linewidth]{figures/spaghetti_cases.png}
+\caption{Ensemble (“spaghetti”) forecasts for three representative test flights.
+Black: observed history; red: ground-truth future; blue: 128 sampled futures; yellow: ensemble mean.}
+\label{fig:spaghetti_cases}
+\end{figure}
+
+\subsection{Flow Evolution and Vector Field Visualization}
+\label{subsec:flow-evolution}
+
+Figure~\ref{fig:flow_snapshots} illustrates the temporal evolution of the learned conditional flow for one example case.
+The three panels correspond to integration times $t{=}0$ (noise), $t{=}0.5$ (intermediate state), and $t{=}1$ (final prediction).
+Each map shows predicted positions (blue), sample vectors (orange), and the grid vector field (purple), together with the observed history (black) and ground-truth future (red).
+
+At $t{=}0$, sample vectors are randomly oriented.
+At $t{=}0.5$, the flow begins to align spatially along the future path.
+At $t{=}1$, the trajectories form a coherent pattern that overlaps with the true continuation.
+The grid vector field exhibits smooth directional changes between neighboring locations.
+
+\begin{figure}[hbt]
+\centering
+\includegraphics[width=\linewidth]{figures/flow_snapshots.png}
+\caption{Evolution of the learned conditional flow for a single test case.
+Each map shows predicted positions (blue), sample vectors (orange), and the grid vector field (purple) at three integration times ($t{=}0$, $t{=}0.5$, $t{=}1$).
+Black: observed history; red: ground-truth future.}
+\label{fig:flow_snapshots}
+\end{figure}
+
+\subsection{Forecast Error vs.~Horizon}
+\label{subsec:deterministic-accuracy}
+
+Figure~\ref{fig:rmse_mae_curves} presents mean absolute error (MAE) and root-mean-square error (RMSE) as a function of prediction horizon.
+Metrics are computed over 512 test trajectories for 3D Euclidean $(x,y,z)$, horizontal $(x,y)$, and vertical $(z)$ components.
+Each plot compares three estimators: ensemble mean, best-of-$S$ sample, and constant-velocity extrapolation (CV).
+
+For all spatial components, errors increase monotonically with horizon.
+3D and horizontal errors show similar growth patterns, while vertical errors remain smaller in magnitude.
+The best-of-$S$ curve stays below the mean curve across all horizons.
+The CV baseline yields consistently larger errors for both MAE and RMSE.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figures/mae_rmse_horizon.png}
+\caption{Mean absolute error (left) and root-mean-square error (right) versus prediction horizon, computed over 512 test samples.
+Rows correspond to 3D Euclidean, horizontal, and vertical components.
+Blue: model mean; green: best-of-$S$; red: constant-velocity baseline.}
+\label{fig:rmse_mae_curves}
+\end{figure}
+
+\subsection{Probabilistic Calibration}
+\label{subsec:calibration}
+
+Figure~\ref{fig:pit_hist} shows the Probability Integral Transform (PIT) histograms for the three spatial components.
+For the $x$ and $y$ axes, the distributions exhibit a clear central peak around 0.5 with lighter tails toward 0 and 1, indicating that the predictive distributions are narrower than the empirical variability (i.e., under-dispersed).
+The $z$ component displays a more complex shape: while it also peaks near the center, it is more uniform than the $x$ and $y$ axes.
+
+\begin{figure}[hbt]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/pit_histograms.png}
+\caption{Probability Integral Transform (PIT) histograms for $x$, $y$, and $z$ components, aggregated across 512 test trajectories with 256 samples each.}
+\label{fig:pit_hist}
+\end{figure}
+
+\subsection{Results on the real-world conflict}
+
+Using the ADS--B histories of the two aircraft, we generated $n=100$ stochastic futures for each trajectory and evaluated all $100\times100$ combinations of predicted paths.
+Among all paired samples, \textbf{\(n_{\mathrm{LOS}} = 8,345\)} combinations (83\%) resulted in a predicted LOS, while \textbf{\(n_{\mathrm{COL}} = 36\)} (0.36\%) met the stricter MAC threshold.
+These results indicate that the model assigns a realistic, non-negligible probability to a future LOS, consistent with the outcome observed in the actual flight data.
+\begin{figure}[hbt]
+\centering
+\includegraphics[width=0.9\linewidth]{figures/conflicting_pair_predictions.png}
+    \caption{Ensemble forecasts for the conflicting aircraft pair.
+    Blue and red lines correspond to sampled futures for each aircraft, while the black lines correspond to the last minute of observation for each flight..}
+    \label{fig:conflict_preds}
+\end{figure}
+
+
+\section{Discussion}
+
+The experiments show that the CFM model produces realistic, uncertainty-aware trajectory predictions.
+Ensemble samples reflect context-dependent variability in aircraft motion: tight, low-spread ensembles for steady flight and wider, occasionally multi-modal spreads for maneuvers.
+The flow visualization indicates that the model learns a smooth, globally consistent vector field that continuously transforms random noise into structured trajectories.
+
+Quantitatively, the CFM predictor consistently achieves lower MAE and RMSE than constant-velocity extrapolation, reducing 3D RMSE by roughly 25–35\% at 60\,s horizons.
+Vertical predictions are particularly accurate, as expected given the slower dynamics in the vertical plane for en-route trajectories. The best-of-$S$ results confirm that the true trajectory is typically contained within the ensemble.
+
+The PIT analysis shows that the CFM predictor tends to produce under-dispersed ensembles, especially in the horizontal components. 
+
+The case study on a real-world encounter further illustrates the operational relevance of such probabilistic forecasts. 
+When applied to the pair of aircraft that actually experienced a LOS the model predicted an LOS in approximately 83\% of all sampled trajectory pairs and a midair collision (MAC) in 0.36\%. 
+By representing uncertainty through ensembles rather than single deterministic paths, the approach naturally quantifies the likelihood and severity of potential conflicts, offering a data-driven complement to existing risk-assessment methodologies. Nevertheless, reliable quantitative risk assessment requires the model to be well calibrated.
+
+Despite these promising results, several limitations remain. 
+First, a small fraction of the sampled trajectories exhibit unrealistic oscillations or excessive curvature, indicating that the learned flow does not always respect the physical constraints of aircraft motion. 
+Incorporating explicit kinematic regularization or flight dynamics priors could help mitigate this issue. 
+Second, the chosen prediction horizon of 60~seconds, although operationally meaningful for short-term conflict detection, strongly influences performance and should be adapted to the intended use-case.
+Finally, the model currently relies only on motion-derived features from ADS--B data. 
+It could be readily extended to include contextual information such as flight plans, weather conditions, or surrounding traffic, which would likely improve model accuracy and calibration.
+
+% \section{Discussion}
+
+\section{Conclusion and Outlook}
+
+This study introduced a generative, flow-matching framework for probabilistic short-term aircraft trajectory forecasting.
+By learning a continuous vector field that maps stochastic perturbations into structured, physically plausible futures, the proposed model provides a principled way to represent uncertainty in aircraft motion.  
+The resulting ensembles yield accurate short-term predictions, calibrated spatial uncertainty, and interpretable representations of traffic dynamics.
+
+The experimental evaluation demonstrated that the model achieves competitive pointwise accuracy and reliable probabilistic calibration while producing context-dependent variability consistent with operational behavior.
+The application to a real-world encounter further illustrated that probabilistic forecasts can meaningfully quantify the likelihood of critical events such as loss of separation or midair collisions, providing interpretable metrics directly relevant to risk assessment.
+
+Looking forward, several research directions emerge.  
+First, improving the physical realism of generated trajectories remains an open challenge: a small fraction of samples display unrealistic oscillations or accelerations, motivating the integration of lightweight flight-dynamics constraints or regularization terms.  
+Second, the prediction horizon strongly influences the model’s usefulness across ATM applications; adapting the forecast duration to task-specific requirements.
+Third, extending the conditioning space beyond ADS--B motion data to include contextual features such as flight plans, weather fields, or nearby traffic has the potential to substantially improve intent inference and uncertainty calibration.
+
+More broadly, this work highlights the potential of flow-based generative modeling as a foundation for data-driven air traffic prediction and risk estimation.
+
+
+% \section*{Acknowledgement}
+% Include your acknowledgements in this section.
+
+% Author contributions (CRediT) are mandatory for all papers with more than one author
+\section*{Author contributions}
+
+\begin{itemize}
+  \item First Author: Conceptualization, Data Curation, Formal Analysis, Investigation, Methodology, Software, Validation, Visualization, Writing (Original Draft), Writing (Review and Editing)
+  \item Second Author: Writing (Review and Editing)
+  \item Third Author: Visualization, Writing (Original Draft), Writing (Review and Editing)
+\end{itemize}
+
+
+\section*{Funding statement}
+This research was funded by the Swiss Federal Offiece of Civil Aviation, grant number 2022-046.
+
+% Data statement is mandatory for all papers
+\section*{Open data statement}
+\textcolor{red}{Mandatory section!}
+
+Include DOI and a short description of supplementary data.
+
+% reproducibility statement is mandatory for all papers
+\section*{Reproducibility statement}
+We provide concrete pointers to reproduce experiments without introducing undocumented assumptions:
+\begin{itemize}
+  \item \textbf{Code and checkpoint}: Inference and plotting code are in `generate_predictions.py`, `inference_utils.py`, `plot_utils.py`, and `metrics.py`. The model checkpoint used for figures is `models/model_1min.pt`.
+  \item \textbf{Data pipeline}: Feature engineering, windowing, normalization, and flight-level splits are implemented in `utils.py`. Cached arrays, normalization stats, and split manifests used here are under `dataset_cache/` (e.g., `ecec4b007a021fa3.*`).
+  \item \textbf{Flow ODE solver}: Heun's predictor–corrector with a fixed grid over $t\in[0,1]$ (default $n_{\text{steps}}{=}64$, step size $\Delta t{=}1/n_{\text{steps}}$), implemented in `inference_utils.sample_future_heun`. Native forecast stride is 5~s (12 tokens to +60~s), with optional resampling provided in `generate_predictions.py`.
+  \item \textbf{Randomness and seeds}: Dataset statistics and splits use seeds defined in `utils.py` (`StatsConfig.stats_seed{=}42`, `SplitConfig.split_seed{=}42`). Sampling initializes futures from standard normal noise.
+  \item \textbf{Training}: End-to-end training and evaluation are documented in the notebooks (e.g., `OSN_paper_training_1min.ipynb`). We train via the regression loss in Eqs.~\eqref{eq:cfm-loss}/\eqref{eq:fm_target}; we do not perform maximum-likelihood training. Optimizer and schedule settings are recorded in the notebooks.
+  \item \textbf{Environment}: Dependencies and versions are specified in `pyproject.toml` and `uv.lock`. Figures under `figures/` are generated by the included scripts and notebooks.
+\end{itemize}
+
+
+\printbibliography
+
+
+
+\end{document}
