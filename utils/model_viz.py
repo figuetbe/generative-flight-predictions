@@ -4,12 +4,18 @@ Model visualization script using torchview
 Creates an SVG visualization of the FlowMatchingModel architecture
 """
 
+import sys
 from collections import OrderedDict
+from pathlib import Path
 
 import torch
 from torchview import draw_graph
 
-from model import FlowMatchingModel
+# Add the project root to the Python path for importing local modules
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from model import FlowMatchingModel  # noqa: E402
 
 
 def main():
@@ -45,7 +51,7 @@ def main():
     # Create example inputs for torchview (batch_size=1 for visualization)
     B = 1
     x_hist = torch.randn(B, 60, 7)  # history sequence: 60 timesteps, 7 features
-    x_t = torch.randn(B, 24, 7)  # future sequence: 24 timesteps, 7 features
+    x_t = torch.randn(B, 12, 7)  # future sequence: 12 timesteps, 7 features
     t = torch.rand(B, 1)  # time scalar
     ctx = torch.randn(B, 8)  # context vector: 8 features
 
